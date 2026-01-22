@@ -1,4 +1,5 @@
 use crate::models::{EmailValidator, ValidatedEmail};
+#[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
 
 impl EmailValidator {
@@ -55,6 +56,7 @@ impl EmailValidator {
     }
 }
 
+#[cfg(feature = "pyo3")]
 #[pymethods]
 impl EmailValidator {
     /// Create a new email validator with the given settings.
