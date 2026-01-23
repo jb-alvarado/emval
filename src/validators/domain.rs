@@ -1,12 +1,11 @@
 use crate::errors::ValidationError;
 use crate::models::EmailValidator;
+use crate::util::ip_addr_ext::IpAddrExt;
+use hickory_resolver::Resolver;
 use idna::uts46::Uts46;
 use idna::uts46::{AsciiDenyList, DnsLength, Hyphens};
 use std::net::IpAddr;
 use std::str::FromStr;
-use trust_dns_resolver::config::*;
-use trust_dns_resolver::Resolver;
-use crate::util::ip_addr_ext::IpAddrExt;
 
 pub fn validate_domain(
     validator: &EmailValidator,
@@ -193,12 +192,11 @@ pub fn validate_domain(
     }
 }
 
-pub fn validate_deliverability(domain: &str) -> Result<(), ValidationError> {
-    let resolver = Resolver::new(ResolverConfig::default(), ResolverOpts::default())
-        .map_err(|e| ValidationError::SyntaxError(e.to_string()))?;
+pub async fn validate_deliverability(domain: &str) -> Result<(), ValidationError> {
+    let resolver = Resolver::builder_tokio().unwrap().build();
 
     // Check MX records
-    if let Ok(mx_records) = resolver.mx_lookup(domain) {
+    if let Ok(mx_records) = resolver.mx_lookup(domain).await {
         for mx in mx_records.iter() {
             let exchange = mx.exchange().to_string();
             if exchange == "." {
@@ -216,19 +214,19 @@ pub fn validate_deliverability(domain: &str) -> Result<(), ValidationError> {
     }
 
     // Fallback to A/AAAA records
-    if let Ok(a_records) = resolver.ipv4_lookup(domain) {
+    if let Ok(a_records) = resolver.ipv4_lookup(domain).await {
         if a_records.iter().any(|ip| IpAddrExt::is_global(&ip.0)) {
             return Ok(());
         }
     }
-    if let Ok(aaaa_records) = resolver.ipv6_lookup(domain) {
+    if let Ok(aaaa_records) = resolver.ipv6_lookup(domain).await {
         if aaaa_records.iter().any(|ip| IpAddrExt::is_global(&ip.0)) {
             return Ok(());
         }
     }
 
     // Check SPF records (TXT)
-    if let Ok(txt_records) = resolver.txt_lookup(domain) {
+    if let Ok(txt_records) = resolver.txt_lookup(domain).await {
         for record in txt_records.iter() {
             let txt = record.to_string();
             if txt.starts_with("v=spf1 ") && txt.contains("-all") {
@@ -342,8 +340,10 @@ mod tests {
     #[case("invalid_domain.com")]
     #[case("例え.テスト")]
     #[case("example..com")]
-    fn test_validate_deliverability_invalid(#[case] domain: &str) {
-        assert!(validate_deliverability(domain).is_err());
+    #[tokio::test]
+    async fn test_validate_deliverability_invalid(#[case] domain: &str) {
+        let validate = validate_deliverability(domain).await;
+        assert!(validate.is_err());
     }
 
     #[rstest]
@@ -353,51 +353,60 @@ mod tests {
     #[case("hotmail.com")]
     #[case("outlook.com")]
     #[case("aol.com")]
-    fn test_validate_deliverability_valid(#[case] domain: &str) {
-        assert!(validate_deliverability(domain).is_ok());
+    #[tokio::test]
+    async fn test_validate_deliverability_valid(#[case] domain: &str) {
+        let validate = validate_deliverability(domain).await;
+        assert!(validate.is_ok());
     }
 
     #[rstest]
     #[case("blackhole.isi.edu")] // Known to have a null MX record
-    fn test_validate_deliverability_null_mx(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_null_mx(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
 
     #[rstest]
     #[case("www.cloudflare.com")]
     #[case("osu.edu")] // OSU's domain
-    fn test_validate_deliverability_valid_a_no_mx(#[case] domain: &str) {
-        assert!(validate_deliverability(domain).is_ok());
+    #[tokio::test]
+    async fn test_validate_deliverability_valid_a_no_mx(#[case] domain: &str) {
+        let validate = validate_deliverability(domain).await;
+        assert!(validate.is_ok());
     }
 
     #[rstest]
     #[case("nonexistentdomain.example")]
     #[case("invalid-domain-test-12345.com")]
-    fn test_validate_deliverability_no_records(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_no_records(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
 
     #[rstest]
     #[case("thisdomaindoesnotexist.tld")]
-    fn test_validate_deliverability_nxdomain(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_nxdomain(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
     #[rstest]
     #[case("example.com")]
     #[case("example.org")]
-    fn test_validate_deliverability_spf_reject_all(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_spf_reject_all(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
 
     #[rstest]
     #[case("localhost")] // Resolves to 127.0.0.1
     #[case("example.internal")] // Assuming it resolves to a private IP
-    fn test_validate_deliverability_private_ip(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_private_ip(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
 
@@ -405,16 +414,30 @@ mod tests {
     #[case("-invaliddomain.com")]
     #[case("invalid_domain.com")]
     #[case("example..com")]
-    fn test_validate_deliverability_invalid_syntax(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_invalid_syntax(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         assert!(result.is_err());
     }
 
     #[rstest]
     #[case("例え.テスト")] // Japanese IDN for "example.test"
     #[case("مثال.إختبار")] // Arabic IDN for "example.test"
-    fn test_validate_deliverability_idn(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_idn(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
+        // Depending on the domain, it may pass or fail
+        // We're checking that the function handles IDNs without panicking
+        assert!(result.is_err() || result.is_ok());
+    }
+
+    #[rstest]
+    #[case("例え.テスト")] // Japanese IDN for "example.test"
+    #[case("مثال.إختبار")] // Arabic IDN for "example.test"
+    fn test_validate_deliverability_idn_sync(#[case] domain: &str) {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(async { validate_deliverability(domain).await });
+
         // Depending on the domain, it may pass or fail
         // We're checking that the function handles IDNs without panicking
         assert!(result.is_err() || result.is_ok());
@@ -422,16 +445,18 @@ mod tests {
 
     #[rstest]
     #[case("no-ns.example.com")] // Assuming this domain has no nameservers
-    fn test_validate_deliverability_no_nameservers(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_no_nameservers(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         // Depending on implementation, might return an error or a specific message
         assert!(result.is_err());
     }
 
     #[rstest]
     #[case("timeout.example.com")]
-    fn test_validate_deliverability_timeout(#[case] domain: &str) {
-        let result = validate_deliverability(domain);
+    #[tokio::test]
+    async fn test_validate_deliverability_timeout(#[case] domain: &str) {
+        let result = validate_deliverability(domain).await;
         // Should handle timeout gracefully
         assert!(result.is_err());
     }

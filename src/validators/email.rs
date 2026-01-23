@@ -1,6 +1,17 @@
 use crate::models::{EmailValidator, ValidatedEmail};
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
+#[cfg(feature = "blocking")]
+use std::sync::LazyLock;
+#[cfg(feature = "blocking")]
+use tokio::runtime::Runtime;
+
+#[cfg(feature = "blocking")]
+fn tokio_runtime() -> &'static Runtime {
+    static RUNTIME: LazyLock<Runtime> =
+        LazyLock::new(|| Runtime::new().expect("failed to create Tokio runtime"));
+    &RUNTIME
+}
 
 impl EmailValidator {
     /// Validates an email address.
@@ -14,6 +25,7 @@ impl EmailValidator {
     /// let validated_email = validator.validate_email("example@domain.com").unwrap();
     /// assert!(validated_email.is_deliverable);
     /// ```
+    #[cfg(feature = "blocking")]
     pub fn validate_email(
         &self,
         email: &str,
@@ -35,7 +47,51 @@ impl EmailValidator {
             crate::validators::validate_domain(self, &unvalidated_domain)?;
 
         if self.deliverable_address && !is_whitelisted_special_domain {
-            crate::validators::validate_deliverability(&ascii_domain)?;
+            tokio_runtime().block_on(async {
+                crate::validators::validate_deliverability(&ascii_domain).await
+            })?;
+        }
+
+        let ascii_email = valid_local_part
+            .is_ascii()
+            .then(|| format!("{}@{}", valid_local_part, ascii_domain));
+        let normalized = format!("{}@{}", valid_local_part, domain_name);
+
+        Ok(ValidatedEmail {
+            original: email.to_string(),
+            local_part: valid_local_part,
+            domain_name,
+            ascii_domain,
+            domain_address,
+            normalized,
+            ascii_email,
+            is_deliverable: true,
+        })
+    }
+
+    #[cfg(not(feature = "blocking"))]
+    pub async fn validate_email(
+        &self,
+        email: &str,
+    ) -> Result<ValidatedEmail, crate::errors::ValidationError> {
+        let (unvalidated_local_part, unvalidated_domain) = crate::validators::split_email(email)?;
+
+        crate::validators::validate_email_length(&unvalidated_local_part, &unvalidated_domain)?;
+
+        let mut valid_local_part =
+            crate::validators::validate_local_part(self, &unvalidated_local_part)?;
+
+        if crate::consts::CASE_INSENSITIVE_MAILBOX_NAMES
+            .contains(&valid_local_part.to_lowercase().as_str())
+        {
+            valid_local_part = valid_local_part.to_lowercase();
+        }
+
+        let (domain_name, ascii_domain, domain_address, is_whitelisted_special_domain) =
+            crate::validators::validate_domain(self, &unvalidated_domain)?;
+
+        if self.deliverable_address && !is_whitelisted_special_domain {
+            crate::validators::validate_deliverability(&ascii_domain).await?;
         }
 
         let ascii_email = valid_local_part

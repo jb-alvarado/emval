@@ -165,9 +165,16 @@ pub use crate::errors::ValidationError;
 pub use crate::models::{EmailValidator, ValidatedEmail};
 
 /// Validate an email with default validator settings.
+#[cfg(feature = "blocking")]
 pub fn validate_email<T: AsRef<str>>(email: T) -> Result<ValidatedEmail, ValidationError> {
     let validator = EmailValidator::default();
     validator.validate_email(email.as_ref())
+}
+
+#[cfg(not(feature = "blocking"))]
+pub async fn validate_email<T: AsRef<str>>(email: T) -> Result<ValidatedEmail, ValidationError> {
+    let validator = EmailValidator::default();
+    validator.validate_email(email.as_ref()).await
 }
 
 #[cfg(feature = "pyo3")]

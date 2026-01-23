@@ -247,6 +247,12 @@ emval normalizes email addresses to ensure consistency:
 
 This project draws inspiration from [python-email-validator](https://github.com/JoshData/python-email-validator). While `python-email-validator` is more comprehensive, `emval` aims to provide a faster solution.
 
+## Rust Specifics:
+
+This crate has two feature gates: one is `pyo3` and the other is `blocking`. `pyo3` is not needed in a Rust project and should therefore be disabled. The `blocking` feature creates a tokio runtime for DNS validations. If you have an async project, you should disable the `blocking` feature too. **Both features are enabled by default**.
+
+To use the `blocking` feature, you need Rust 1.80 or higher.
+
 ## Getting Help
 
 For questions and issues, please open an issue in the [GitHub issue tracker](https://github.com/bnkc/emval/issues).
